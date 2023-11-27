@@ -1,11 +1,12 @@
 # Test that the github action it working. Based on example here: https://docs.github.com/en/actions/creating-actions/creating-a-docker-container-action#example-using-a-private-action
 name: Test Action
 
-# Run every time a tag is pushed to main. Won't trigger on tag names including including a /
+# Run only after the container release is finished
 on:
-  - push
-  - workflow_dispatch
-
+  workflow_run:
+    workflows: ["Release"]
+    types:
+      - completed
 jobs:
   action:
     runs-on: ubuntu-latest

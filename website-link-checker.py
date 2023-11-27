@@ -44,7 +44,7 @@ muffet_path = shutil.which("muffet")
 if not muffet_path:
     if shutil.os.path.isfile("/muffet"):
         muffet_path = "/muffet"
-    elif shutil.os.path.isfile("./muffet")
+    elif shutil.os.path.isfile("./muffet"):
         muffet_path = shutil.os.path.realpath("./muffet")
     else:
         raise Exception("Couldn't find muffet")
