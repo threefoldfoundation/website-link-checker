@@ -39,10 +39,15 @@ elif args.warnings and args.warnings[0] == "all":
 else:
     warnings = args.warnings
 
-# Try to find muffet on PATH. If not, assume it's in the pwd
+# If muffet isn't on PATH, check a couple other likely spots
 muffet_path = shutil.which("muffet")
 if not muffet_path:
-    muffet_path = "./muffet"
+    if shutil.os.path.isfile("/muffet"):
+        muffet_path = "/muffet"
+    elif shutil.os.path.isfile("./muffet")
+        muffet_path = shutil.os.path.realpath("./muffet")
+    else:
+        raise Exception("Couldn't find muffet")
 
 proc = subprocess.run(
     [
