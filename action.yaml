@@ -1,0 +1,25 @@
+name: 'Website Link Checker'
+description: 'Scans a site for links that return http error codes, using muffet, and filters the result to create errors or warnings as specified'
+
+inputs:
+  url:
+    description: 'URL of site to check, including http:// or https://'
+    required: true
+  errors:
+    description: 'Codes to treat as errors. Specify one or more codes separated by spaces or "all"'
+  warnings:
+    description: 'Codes to treat as warnings. Specify one or more codes separated by spaces or "all"'
+
+outputs:
+  report:
+    description: 'The report of which links gave errors or warnings'
+
+runs:
+  using: 'docker'
+  image: 'ghcr.io/threefoldfoundation/website-link-checker'
+  args:
+    - ${{ inputs.url }}
+    - '-e'
+    - ${{ inputs.errors }}
+    - '-w'
+    - ${{ inputs.warnings }}

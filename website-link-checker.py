@@ -71,6 +71,7 @@ for item in data:
             alerts = filtered_data.setdefault(item["url"], {})
             alerts.setdefault("warnings", []).append(link)
 
+print()
 for url, alerts in filtered_data.items():
     heading = "Found on page: " + url
     print(heading)
