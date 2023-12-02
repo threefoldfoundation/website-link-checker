@@ -21,7 +21,7 @@ This is a Python program that calls muffet on a whole website and then filters a
 ## How the Program Exits
 
 Exits with error code 1 if at least one error is found, as specified with --errors
-flag. Otherwise exits with code 0. Note that --warnings on its will always exit with code 0.
+flag. Otherwise exits with code 0. Note that errors set as --warnings will always exit with code 0.
 
 ## Program Arguments
 
