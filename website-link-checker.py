@@ -3,6 +3,16 @@ import argparse
 import subprocess
 import shutil
 import sys
+import requests
+
+# We retry certain codes using requests, because sites seem to block muffet by
+# returning these codes, even if we limit it to a single simultaneous request
+# per host and spoof the user agent. Not sure why requests is different, but
+# this helps reduce false positives significantly
+RETRY_CODES = ["403", "429"]
+
+# Nothing special about this, just a believable user agent
+HEADERS = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/39.0.2171.95 Safari/537.36'}
 
 parser = argparse.ArgumentParser(
     prog="muffet error filter",
@@ -21,6 +31,12 @@ parser.add_argument(
     "--warnings",
     nargs='+',
     help="Specify one, many or all error codes to be filtered as warnings (e.g. -w 404, -w 403 404, -w all). Use -w all to show all warnings.",
+)
+parser.add_argument(
+    "-r",
+    "--retry",
+    action="store_true",
+    help="Retry 403 and 429 codes using python requests. This adds time but reduces false positives.",
 )
 
 args = parser.parse_args()
@@ -65,30 +81,53 @@ data = json.loads(proc.stdout)
 
 has_error = False
 filtered_data = {}
-for item in data:
-    for link in item["links"]:
+for page in data:
+    for link in page["links"]:
         error = link["error"].split()[0]
         if (errors == "all" and error not in warnings) or error in errors:
-            alerts = filtered_data.setdefault(item["url"], {})
-            alerts.setdefault("errors", []).append(link)
+            alerts = filtered_data.setdefault(page["url"], {"errors": {}, "warnings": {}})
+            alerts["errors"][link["url"]] = link["error"]
             has_error = True
         elif warnings == "all" or error in warnings:
-            alerts = filtered_data.setdefault(item["url"], {})
-            alerts.setdefault("warnings", []).append(link)
+            alerts = filtered_data.setdefault(page["url"], {"errors": {}, "warnings": {}})
+            alerts["errors"][link["url"]] = link["error"]
+
+if args.retry:
+    # Since links appearing on multiple pages will be duplicated in muffet's
+    # report, keep track of any detected false positives to avoid rechecking
+    false_positives = []
+    for page, alerts in filtered_data.items():
+        for alert in ["errors", "warnings"]:
+            if alert in alerts:
+                for link_url, error in list(alerts[alert].items()):
+                    if link_url in false_positives:
+                        alerts[alert].pop(link_url)
+                    # Only match the exact code here. In case there's more info
+                    # like a redirect, we can retain it
+                    elif error in RETRY_CODES or "not found" in error:
+                        response = requests.get(link_url, headers=HEADERS)
+                        if response.ok:
+                            false_positives.append(link_url)
+                            alerts[alert].pop(link_url)
+
+    # Remove any pages for which all alerts cleared
+    for page, alerts in list(filtered_data.items()):
+        if not (alerts["errors"] or alerts["warnings"]):
+            filtered_data.pop(page)
 
 print()
-for url, alerts in filtered_data.items():
-    heading = "Found on page: " + url
+for page_url, alerts in filtered_data.items():
+    heading = "Found on page: " + page_url
     print(heading)
     print("=" * len(heading))
     try:
-        for link in alerts["errors"]:
-            print("Error {} -> {}".format(link["error"], link["url"]))
+        for link_url, error in alerts["errors"].items():
+            print("Error {} -> {}".format(link_url, error))
     except KeyError:
         pass
     try:
-        for link in alerts["warnings"]:
-            print("Warning {} -> {}".format(link["error"], link["url"]))
+        for link_url, error in alerts["warnings"].items():
+            print("Warning {} -> {}".format(link_url, error))
     except KeyError:
         pass
     print()
