@@ -122,12 +122,12 @@ for page_url, alerts in filtered_data.items():
     print("=" * len(heading))
     try:
         for link_url, error in alerts["errors"].items():
-            print("Error {} -> {}".format(link_url, error))
+            print("Error {} -> {}".format(error, link_url))
     except KeyError:
         pass
     try:
         for link_url, error in alerts["warnings"].items():
-            print("Warning {} -> {}".format(link_url, error))
+            print("Warning {} -> {}".format(error, link_url))
     except KeyError:
         pass
     print()
