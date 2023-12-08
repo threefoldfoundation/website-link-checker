@@ -90,7 +90,7 @@ for page in data:
             has_error = True
         elif warnings == "all" or error in warnings:
             alerts = filtered_data.setdefault(page["url"], {"errors": {}, "warnings": {}})
-            alerts["errors"][link["url"]] = link["error"]
+            alerts["warnings"][link["url"]] = link["error"]
 
 if args.retry:
     # Since links appearing on multiple pages will be duplicated in muffet's
