@@ -3,6 +3,7 @@ import argparse
 import subprocess
 import shutil
 import sys
+import time
 import requests
 
 # Timeout in seconds used for both muffet and retries via requests if enabled
@@ -82,6 +83,7 @@ if not muffet_path:
     else:
         raise Exception("Couldn't find muffet")
 
+muffet_start = time.time()
 proc = subprocess.run(
     [
         muffet_path,
@@ -93,13 +95,16 @@ proc = subprocess.run(
     ],
     capture_output=True,
 )
+muffet_end = time.time()
 
 data = json.loads(proc.stdout)
 
 has_error = False
+muffet_links = set()
 filtered_data = {}
 for page in data:
     for link in page["links"]:
+        muffet_links.add(link["url"])
         error = link["error"].split()[0]
         if (errors == "all" and error not in warnings) or error in errors:
             alerts = filtered_data.setdefault(page["url"], {"errors": {}, "warnings": {}})
@@ -112,6 +117,8 @@ for page in data:
 if args.retry:
     # Since links appearing on multiple pages will be duplicated in muffet's
     # report, keep track of any detected false positives to avoid rechecking
+    retry_start = time.time()
+    retry_urls = []
     false_positives = []
     for page, alerts in filtered_data.items():
         for alert in ["errors", "warnings"]:
@@ -125,6 +132,8 @@ if args.retry:
                     if ok:
                         false_positives.append(link_url)
                         alerts[alert].pop(link_url)
+                    retry_urls.append(link_url)
+    retry_end = time.time()
 
     # Remove any pages for which all alerts cleared
     for page, alerts in list(filtered_data.items()):
@@ -147,6 +156,11 @@ for page_url, alerts in filtered_data.items():
     except KeyError:
         pass
     print()
+
+print()
+print("{} errors found by muffet in {:.2f} seconds".format(len(muffet_links), muffet_end - muffet_start))
+if args.retry:
+    print("{} links retried and {} okay urls found in {:.2f} seconds".format(len(retry_urls), len(false_positives), retry_end - retry_start))
 
 # Exit with exit(1) if the website contains at least one error. Otherwise, exit with exit(0).
 if has_error:
