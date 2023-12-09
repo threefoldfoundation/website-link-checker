@@ -5,14 +5,31 @@ import shutil
 import sys
 import requests
 
+# Timeout in seconds used for both muffet and retries via requests if enabled
+TIMEOUT = 30
+
 # We retry certain codes using requests, because sites seem to block muffet by
 # returning these codes, even if we limit it to a single simultaneous request
 # per host and spoof the user agent. Not sure why requests is different, but
 # this helps reduce false positives significantly
 RETRY_CODES = ["403", "429"]
 
+# We also retry on certain messages that muffet returns
+RETRY_MSGS = ["not found", "timeout", "couldn't find DNS entries", "server closed connection"]
+
 # Nothing special about this, just a believable user agent
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/39.0.2171.95 Safari/537.36'}
+
+def get_headers(url):
+    """
+    Download only the headers of an http response and then close the connection.
+    Since we only care about the response code, no need to download the site
+    """
+    try:
+        with requests.get(url, stream=True, headers=HEADERS, timeout=TIMEOUT) as response:
+            return response.ok
+    except:
+        return False
 
 parser = argparse.ArgumentParser(
     prog="muffet error filter",
@@ -68,7 +85,7 @@ if not muffet_path:
 proc = subprocess.run(
     [
         muffet_path,
-        "--timeout=30",
+        "--timeout=" + str(TIMEOUT),
         "--color=always",
         "--buffer-size=8192",
         "--format=json",
@@ -98,17 +115,16 @@ if args.retry:
     false_positives = []
     for page, alerts in filtered_data.items():
         for alert in ["errors", "warnings"]:
-            if alert in alerts:
-                for link_url, error in list(alerts[alert].items()):
-                    if link_url in false_positives:
+            for link_url, error in list(alerts[alert].items()):
+                if link_url in false_positives:
+                    alerts[alert].pop(link_url)
+                # Only match the exact code here. In case there's more info
+                # like a redirect, we can retain it
+                elif error in RETRY_CODES or [True for msg in RETRY_MSGS if msg in error]:
+                    ok = get_headers(link_url)
+                    if ok:
+                        false_positives.append(link_url)
                         alerts[alert].pop(link_url)
-                    # Only match the exact code here. In case there's more info
-                    # like a redirect, we can retain it
-                    elif error in RETRY_CODES or "not found" in error:
-                        response = requests.get(link_url, headers=HEADERS)
-                        if response.ok:
-                            false_positives.append(link_url)
-                            alerts[alert].pop(link_url)
 
     # Remove any pages for which all alerts cleared
     for page, alerts in list(filtered_data.items()):
