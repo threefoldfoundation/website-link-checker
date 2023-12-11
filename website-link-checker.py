@@ -4,10 +4,19 @@ import subprocess
 import shutil
 import sys
 import time
-import requests
+import itertools
+import requests.exceptions
+import requests_futures.sessions
 
 # Timeout in seconds used for both muffet and retries via requests if enabled
 TIMEOUT = 30
+
+# Max worker threads for parallel retry requests
+WORKERS = 100
+
+# Sometimes decoding muffet json output fails (not sure why), so we retry this
+# many times by running muffet again
+MUFFET_RETRIES = 2
 
 # We retry certain codes using requests, because sites seem to block muffet by
 # returning these codes, even if we limit it to a single simultaneous request
@@ -16,21 +25,27 @@ TIMEOUT = 30
 RETRY_CODES = ["403", "429"]
 
 # We also retry on certain messages that muffet returns
-RETRY_MSGS = ["not found", "timeout", "couldn't find DNS entries", "server closed connection"]
+RETRY_MSGS = ["not found", "timeout", "timed out", "couldn't find DNS entries", "server closed connection"]
 
 # Nothing special about this, just a believable user agent
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/39.0.2171.95 Safari/537.36'}
 
-def get_headers(url):
-    """
-    Download only the headers of an http response and then close the connection.
-    Since we only care about the response code, no need to download the site
-    """
-    try:
-        with requests.get(url, stream=True, headers=HEADERS, timeout=TIMEOUT) as response:
-            return response.ok
-    except:
-        return False
+def get_headers_concurrent(urls):
+    urls = set(urls) # Remove any duplicates
+    session = requests_futures.sessions.FuturesSession(max_workers=WORKERS)
+    futures = []
+    for url in urls:
+        futures.append(session.get(url, stream=True, headers=HEADERS, timeout=TIMEOUT))
+    responses = []
+    for future in futures:
+        try:
+            response = future.result()
+            response.close()
+            responses.append(response)
+        except requests.exceptions.ReadTimeout:
+            # We only care about okay responses, so timeouts can be discarded
+            pass
+    return responses
 
 parser = argparse.ArgumentParser(
     prog="muffet error filter",
@@ -83,57 +98,66 @@ if not muffet_path:
     else:
         raise Exception("Couldn't find muffet")
 
-muffet_start = time.time()
-proc = subprocess.run(
-    [
-        muffet_path,
-        "--timeout=" + str(TIMEOUT),
-        "--color=always",
-        "--buffer-size=8192",
-        "--format=json",
-        args.url,
-    ],
-    capture_output=True,
-)
-muffet_end = time.time()
+for i in range(MUFFET_RETRIES):
+    try:
+        muffet_start = time.time()
+        proc = subprocess.run(
+            [
+                muffet_path,
+                "--timeout=" + str(TIMEOUT),
+                "--color=always",
+                "--buffer-size=8192",
+                "--format=json",
+                args.url,
+            ],
+            capture_output=True,
+        )
+        muffet_end = time.time()
 
-data = json.loads(proc.stdout)
+        data = json.loads(proc.stdout)
+        break
+
+    except json.decoder.JSONDecodeError:
+        if i == MUFFET_RETRIES:
+            print("Muffet retry limit reached.")
+            raise
 
 has_error = False
-muffet_links = set()
+muffet_links = set() # Track total links checked by muffet for stats
 filtered_data = {}
 for page in data:
     for link in page["links"]:
-        muffet_links.add(link["url"])
+        muffet_links.add(link['url'])
         error = link["error"].split()[0]
         if (errors == "all" and error not in warnings) or error in errors:
-            alerts = filtered_data.setdefault(page["url"], {"errors": {}, "warnings": {}})
-            alerts["errors"][link["url"]] = link["error"]
+            alerts = filtered_data.setdefault(page["url"], {"errors": [], "warnings": []})
+            alerts["errors"].append((link["url"], link["error"]))
             has_error = True
         elif warnings == "all" or error in warnings:
-            alerts = filtered_data.setdefault(page["url"], {"errors": {}, "warnings": {}})
-            alerts["warnings"][link["url"]] = link["error"]
+            alerts = filtered_data.setdefault(page["url"], {"errors": [], "warnings": []})
+            alerts["warnings"].append((link["url"], link["error"]))
 
 if args.retry:
-    # Since links appearing on multiple pages will be duplicated in muffet's
-    # report, keep track of any detected false positives to avoid rechecking
+    # Make a list of urls that match the retry criteria
+    retry_urls = set()
+    for alerts in filtered_data.values():
+        for link_url, error in alerts["errors"] + alerts["warnings"]:
+            if error in RETRY_CODES or [True for msg in RETRY_MSGS if msg in error]:
+                    retry_urls.add(link_url)
+
     retry_start = time.time()
-    retry_urls = []
-    false_positives = []
-    for page, alerts in filtered_data.items():
-        for alert in ["errors", "warnings"]:
-            for link_url, error in list(alerts[alert].items()):
-                if link_url in false_positives:
-                    alerts[alert].pop(link_url)
-                # Only match the exact code here. In case there's more info
-                # like a redirect, we can retain it
-                elif error in RETRY_CODES or [True for msg in RETRY_MSGS if msg in error]:
-                    ok = get_headers(link_url)
-                    if ok:
-                        false_positives.append(link_url)
-                        alerts[alert].pop(link_url)
-                    retry_urls.append(link_url)
+    responses = get_headers_concurrent(retry_urls)
     retry_end = time.time()
+
+    # Make a set (for fast "in") of urls that turned out to be okay. In case of
+    # redirect, the original url appears in history[0]. TODO: convert redirects
+    # into errors/warnings when appropriate
+    ok_urls = {(r.history or [r])[0].url for r in responses if r.ok}
+
+    # Now filter the results again and discard links that are actually okay
+    for alerts in filtered_data.values():
+        for alert, links in alerts.items():
+            alerts[alert] = [a for a in links if a[0] not in ok_urls]
 
     # Remove any pages for which all alerts cleared
     for page, alerts in list(filtered_data.items()):
@@ -146,12 +170,12 @@ for page_url, alerts in filtered_data.items():
     print(heading)
     print("=" * len(heading))
     try:
-        for link_url, error in alerts["errors"].items():
+        for link_url, error in alerts["errors"]:
             print("Error {} -> {}".format(error, link_url))
     except KeyError:
         pass
     try:
-        for link_url, error in alerts["warnings"].items():
+        for link_url, error in alerts["warnings"]:
             print("Warning {} -> {}".format(error, link_url))
     except KeyError:
         pass
@@ -160,10 +184,11 @@ for page_url, alerts in filtered_data.items():
 print()
 print("{} errors found by muffet in {:.2f} seconds".format(len(muffet_links), muffet_end - muffet_start))
 if args.retry:
-    print("{} links retried and {} okay urls found in {:.2f} seconds".format(len(retry_urls), len(false_positives), retry_end - retry_start))
+    print("{} links retried and {} okay urls found in {:.2f} seconds".format(len(retry_urls), len(ok_urls), retry_end - retry_start))
 
 # Exit with exit(1) if the website contains at least one error. Otherwise, exit with exit(0).
 if has_error:
+    print()
     sys.exit(1)
 else:
     sys.exit(0)
