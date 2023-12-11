@@ -14,6 +14,10 @@ TIMEOUT = 30
 # Max worker threads for parallel retry requests
 WORKERS = 100
 
+# Sometimes decoding muffet json output fails (not sure why), so we retry this
+# many times by running muffet again
+MUFFET_RETRIES = 2
+
 # We retry certain codes using requests, because sites seem to block muffet by
 # returning these codes, even if we limit it to a single simultaneous request
 # per host and spoof the user agent. Not sure why requests is different, but
@@ -94,22 +98,29 @@ if not muffet_path:
     else:
         raise Exception("Couldn't find muffet")
 
-muffet_start = time.time()
-proc = subprocess.run(
-    [
-        muffet_path,
-        "--timeout=" + str(TIMEOUT),
-        "--color=always",
-        "--buffer-size=8192",
-        "--format=json",
-        args.url,
-    ],
-    capture_output=True,
-)
-muffet_end = time.time()
+for i in range(MUFFET_RETRIES):
+    try:
+        muffet_start = time.time()
+        proc = subprocess.run(
+            [
+                muffet_path,
+                "--timeout=" + str(TIMEOUT),
+                "--color=always",
+                "--buffer-size=8192",
+                "--format=json",
+                args.url,
+            ],
+            capture_output=True,
+        )
+        muffet_end = time.time()
 
-# TODO - catch json.decoder.JSONDecodeError and retry
-data = json.loads(proc.stdout)
+        data = json.loads(proc.stdout)
+        break
+
+    except json.decoder.JSONDecodeError:
+        if i == MUFFET_RETRIES:
+            print("Muffet retry limit reached.")
+            raise
 
 has_error = False
 muffet_links = set() # Track total links checked by muffet for stats
@@ -138,8 +149,12 @@ if args.retry:
     responses = get_headers_concurrent(retry_urls)
     retry_end = time.time()
 
+    # Make a set (for fast "in") of urls that turned out to be okay. In case of
+    # redirect, the original url appears in history[0]. TODO: convert redirects
+    # into errors/warnings when appropriate
+    ok_urls = {(r.history or [r])[0].url for r in responses if r.ok}
+
     # Now filter the results again and discard links that are actually okay
-    ok_urls = {r.url for r in responses if r.ok} # Use a set for fast "in"
     for alerts in filtered_data.values():
         for alert, links in alerts.items():
             alerts[alert] = [a for a in links if a[0] not in ok_urls]
